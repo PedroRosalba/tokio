@@ -205,5 +205,12 @@ name = "rt_emscripten_event_loop_main"
 path = "tests/rt_emscripten_event_loop_main.rs"
 harness = false
 
+# `main` returns into the host event loop, whose ticks run the tasks that
+# drop their own loops.
+[[test]]
+name = "rt_emscripten_event_loop_drop"
+path = "tests/rt_emscripten_event_loop_drop.rs"
+harness = false
+
 [lints]
 workspace = true

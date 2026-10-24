@@ -78,10 +78,11 @@ impl Hold {
 
 /// The host loop's callbacks into the runtime, and what they hold. Every
 /// callback receives the `Hosted` as its argument; it lives in an `Rc` at a
-/// fixed address, and detaches on drop before the descriptor closes.
+/// fixed address, and detaches on drop before the descriptor closes. A
+/// callback holds the `Rc` for its tick, whose tasks may drop the loop.
 #[derive(Debug)]
 pub(super) struct Hosted {
-    /// For a deferred callback to find the loop again.
+    /// For a callback to hold the loop, and a deferred one to find it again.
     this: Weak<Hosted>,
     core: Weak<RefCell<Core<LocalRuntime>>>,
     epfd: RawFd,
@@ -187,14 +188,36 @@ impl Hosted {
             .set(Some(unsafe { emscripten_set_immediate(immediate, this) }));
     }
 
+    /// The `Hosted` a callback was registered with, held for the callback.
+    ///
+    /// # Safety
+    ///
+    /// `user_data` is the argument of a callback registered by a `Hosted`.
+    unsafe fn from_user_data(user_data: *mut c_void) -> Rc<Hosted> {
+        // SAFETY: the `Hosted` that registered the callback. `drop`
+        // unregisters every callback before the `Hosted` is freed, so none
+        // fires after `drop`, and the `Hosted` is still strongly held here.
+        // The `expect` cannot detect a dropped `Hosted`: reading `this` from
+        // freed memory would already be undefined behavior.
+        let hosted = unsafe { &*(user_data as *const Hosted) };
+        hosted
+            .this
+            .upgrade()
+            .expect("a registered callback's loop is alive")
+    }
+
     /// Ticks the loop from a host callback.
     ///
     /// While a runtime is entered on this thread (a `block_on` suspended
     /// through JSPI) no tick can run; the callback is deferred to that
     /// runtime's exit, and the readiness listener comes off until then
     /// rather than firing every host turn.
-    fn tick(&self) {
-        let this = self.this.clone();
+    ///
+    /// A task may drop the loop, or shut it down, during the tick. Both
+    /// halves are held until it returns: the `Hosted` then detaches, and the
+    /// runtime drops after it, as when the program drops the loop.
+    fn tick(hosted: Rc<Hosted>) {
+        let this = hosted.this.clone();
         let deferred = crate::runtime::jspi::defer_after_runtime_exit(move || {
             if let Some(hosted) = this.upgrade() {
                 let _ = hosted.listen(true);
@@ -202,10 +225,10 @@ impl Hosted {
             }
         });
         if deferred {
-            let _ = self.listen(false);
+            let _ = hosted.listen(false);
             return;
         }
-        let Some(core) = self.core.upgrade() else {
+        let Some(core) = hosted.core.upgrade() else {
             return;
         };
         // No Rust frame is above the host's callback to catch a panic (a
@@ -213,12 +236,15 @@ impl Hosted {
         // unwind into the host's JavaScript. Abort as an uncaught panic on
         // `main` would.
         let ticked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            core.borrow_mut().tick(self.batch);
-            self.after_turn();
+            core.borrow_mut().tick(hosted.batch);
+            hosted.after_turn();
         }));
         if ticked.is_err() {
             std::process::abort();
         }
+        // Detaches first if a task dropped the loop: the runtime, and its
+        // descriptor, drop with `core`.
+        drop(hosted);
     }
 }
 
@@ -239,24 +265,23 @@ impl Drop for Hosted {
 
 /// The readiness listener: the set has uncollected events.
 extern "C" fn ready(_epfd: i32, user_data: *mut c_void) {
-    // SAFETY: `user_data` is the `Hosted` that registered this callback,
-    // alive until `drop` unregisters it.
-    let hosted = unsafe { &*(user_data as *const Hosted) };
-    hosted.tick();
+    // SAFETY: `user_data` is the `Hosted` that registered this callback.
+    let hosted = unsafe { Hosted::from_user_data(user_data) };
+    Hosted::tick(hosted);
 }
 
 /// The deadline timer fired.
 extern "C" fn deadline(user_data: *mut c_void) {
     // SAFETY: as `ready`; the timeout is cleared in `drop`.
-    let hosted = unsafe { &*(user_data as *const Hosted) };
+    let hosted = unsafe { Hosted::from_user_data(user_data) };
     hosted.deadline.set(None);
-    hosted.tick();
+    Hosted::tick(hosted);
 }
 
 /// The follow-up for ready work.
 extern "C" fn immediate(user_data: *mut c_void) {
     // SAFETY: as `ready`; the immediate is cleared in `drop`.
-    let hosted = unsafe { &*(user_data as *const Hosted) };
+    let hosted = unsafe { Hosted::from_user_data(user_data) };
     hosted.immediate.set(None);
-    hosted.tick();
+    Hosted::tick(hosted);
 }
