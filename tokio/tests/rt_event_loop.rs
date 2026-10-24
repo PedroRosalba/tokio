@@ -12,7 +12,7 @@ use std::future::Future;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -935,6 +935,102 @@ fn on_work_available_without_io_driver() {
         .unwrap();
     assert_eq!(n.load(SeqCst), 2);
     el.pump_park(|| jh.is_finished());
+}
+
+// ===== paused clock =====
+
+/// A paused `EventLoop` and the receiving end of its callback.
+fn paused_event_loop() -> (EventLoop, std::sync::mpsc::Receiver<()>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let el = Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .on_work_available(move || {
+            let _ = tx.send(());
+        })
+        .build_event_loop()
+        .unwrap();
+    (el, rx)
+}
+
+/// The callback host, its wait bounded so that a stall fails. Returns the
+/// number of waits.
+fn pump_callback(
+    el: &mut EventLoop,
+    rx: &std::sync::mpsc::Receiver<()>,
+    mut done: impl FnMut() -> bool,
+) -> usize {
+    let start = Instant::now();
+    let mut waits = 0;
+    while !done() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "stalled, next_sleep = {:?}",
+            el.next_sleep()
+        );
+        let limit = Duration::from_millis(100);
+        let _ = rx.recv_timeout(el.next_sleep().map_or(limit, |t| t.min(limit)));
+        el.tick(64);
+        waits += 1;
+    }
+    waits
+}
+
+#[test]
+fn paused_clock_auto_advances_under_a_callback_host() {
+    let (mut el, rx) = paused_event_loop();
+    let (slept_tx, mut slept) = oneshot::channel();
+    let jh = el.handle().spawn(async move {
+        let start = tokio::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let _ = slept_tx.send(start.elapsed());
+    });
+    pump_callback(&mut el, &rx, || jh.is_finished());
+    assert!(slept.try_recv().unwrap() >= Duration::from_secs(3600));
+}
+
+#[test]
+fn paused_clock_held_back_by_spawn_blocking() {
+    let (mut el, rx) = paused_event_loop();
+    let blocked = Arc::new(AtomicBool::new(true));
+    let b = blocked.clone();
+    let (fired_tx, mut fired) = oneshot::channel();
+    let jh = el.handle().spawn(async move {
+        let b2 = b.clone();
+        // Detached: nothing waits on it, so only its release wakes the host.
+        drop(tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            b2.store(false, SeqCst);
+        }));
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let _ = fired_tx.send(b.load(SeqCst));
+    });
+    assert_eq!(el.tick(64), 1);
+    assert_ne!(el.next_sleep(), ZERO, "the blocking task holds it back");
+    let start = Instant::now();
+    let waits = pump_callback(&mut el, &rx, || jh.is_finished());
+    assert!(start.elapsed() >= Duration::from_millis(250));
+    assert!(waits < 50, "the host spun: {waits} waits");
+    assert!(!fired.try_recv().unwrap(), "the hour passed while it ran");
+}
+
+#[cfg(unix)]
+#[test]
+fn paused_clock_auto_advances_under_a_descriptor_host() {
+    let mut el = Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build_local_event_loop(LocalOptions::default())
+        .unwrap();
+    let jh = el.handle().spawn(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    assert_eq!(el.tick(64), 1);
+    assert!(!jh.is_finished());
+    // With nothing to run, the clock auto-advances to the timer: it is
+    // ready now, not an hour of real time away.
+    assert_eq!(el.next_sleep(), ZERO);
+    el.pump_fd(|| jh.is_finished());
 }
 
 // ===== lifecycle =====

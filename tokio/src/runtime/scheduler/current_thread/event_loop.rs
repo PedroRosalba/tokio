@@ -104,6 +104,12 @@ impl CoreGuard<'_> {
         let ret = self.enter(|core, context| {
             let handle = &context.handle;
             let _turn = Turn::begin(&handle.driver);
+            // With nothing to run, a paused clock auto-advances to the next
+            // timer, as `block_on`'s park would; the turn fires it.
+            #[cfg(feature = "test-util")]
+            if !context.has_ready_work(&core) {
+                handle.driver.auto_advance();
+            }
             // The driver's turn: I/O readiness and due timers, ahead of the
             // batch that consumes what they wake.
             let core = context.park_yield(core, handle);

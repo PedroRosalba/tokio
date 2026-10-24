@@ -152,6 +152,27 @@ impl Handle {
         pub(crate) fn has_pending_wakeup(&self) -> bool {
             self.event_loop.as_ref().is_some_and(|s| s.is_pending())
         }
+
+        /// Whether a tick would auto-advance the paused clock to a timer.
+        #[cfg(feature = "test-util")]
+        pub(crate) fn can_auto_advance(&self) -> bool {
+            self.time.is_some() && self.clock.can_auto_advance()
+        }
+
+        /// Advances a paused clock to the next timer, as a park with nothing
+        /// to run would, without the park's wait. A wakeup since the last
+        /// turn holds it back, as it does the park's.
+        #[cfg(feature = "test-util")]
+        pub(crate) fn auto_advance(&self) {
+            if !self.can_auto_advance() || self.time().did_wake() {
+                return;
+            }
+            if let Some(duration) = self.time().next_timeout(&self.clock) {
+                if let Err(msg) = self.clock.advance(duration) {
+                    panic!("{}", msg);
+                }
+            }
+        }
     }
 
     pub(crate) fn unpark_self(&self) {

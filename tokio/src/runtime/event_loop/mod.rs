@@ -250,7 +250,13 @@ impl<R: Scheduler> Core<R> {
         }
         #[cfg(feature = "time")]
         {
-            driver.time.as_ref()?.next_timeout(&driver.clock)
+            let next = driver.time.as_ref()?.next_timeout(&driver.clock)?;
+            // A tick auto-advances a paused clock to the timer.
+            #[cfg(feature = "test-util")]
+            if driver.can_auto_advance() {
+                return Some(Duration::ZERO);
+            }
+            Some(next)
         }
         #[cfg(not(feature = "time"))]
         {
@@ -304,6 +310,8 @@ macro_rules! event_loop_methods {
         /// Polls the I/O driver without blocking, then polls up to
         /// `max_tasks` ready tasks. Returns the number of tasks polled.
         /// `max_tasks == 0` drains the driver without running any tasks.
+        /// With the clock paused and no task ready, the tick first
+        /// auto-advances the clock to the next timer, `tick(0)` included.
         ///
         /// Call this on a wakeup or when [`next_sleep`](Self::next_sleep) has
         /// elapsed, and again while `next_sleep` is `Some(ZERO)`. A wakeup
@@ -327,7 +335,10 @@ macro_rules! event_loop_methods {
         /// again.
         ///
         /// * `Some(ZERO)`: work is ready now, or an [`Unparker`] woke the
-        ///   loop since the last tick or park; tick again.
+        ///   loop since the last tick or park; tick again. With the clock
+        ///   paused, also while a timer is pending: the tick auto-advances
+        ///   the clock to it, unless a [`spawn_blocking`] task holds
+        ///   auto-advance back.
         /// * `Some(d)`: nothing until a timer fires in `d`, unless woken.
         /// * `None`: nothing scheduled; wait for a wakeup.
         ///
@@ -342,6 +353,7 @@ macro_rules! event_loop_methods {
         /// waiting.
         ///
         /// [`on_work_available`]: crate::runtime::Builder::on_work_available
+        /// [`spawn_blocking`]: crate::task::spawn_blocking
         pub fn next_sleep(&self) -> Option<Duration> {
             self.core.next_sleep()
         }
