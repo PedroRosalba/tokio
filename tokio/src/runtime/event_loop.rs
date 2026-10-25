@@ -227,7 +227,8 @@ impl Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        if let Some(driver) = self.reactor.take().and_then(|r| r.stop(&self.handle)) {
+        // In place: the host's callbacks are keyed by the `Reactor`'s address.
+        if let Some(driver) = self.reactor.get_mut().and_then(|r| r.stop(&self.handle)) {
             let handle = self.handle.inner.as_current_thread();
             self.runtime.current_thread().restore_driver(handle, driver);
         }

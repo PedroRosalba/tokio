@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub(super) struct Reactor {
-    thread: std::thread::JoinHandle<Driver>,
+    thread: Option<std::thread::JoinHandle<Driver>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -42,7 +42,10 @@ impl Reactor {
                     driver
                 })?
         };
-        Ok(Reactor { thread, stop })
+        Ok(Reactor {
+            thread: Some(thread),
+            stop,
+        })
     }
 
     pub(super) fn attach(&self) -> io::Result<()> {
@@ -51,10 +54,10 @@ impl Reactor {
 
     pub(super) fn after_turn(&self, _handle: &Handle) {}
 
-    pub(super) fn stop(self, handle: &Handle) -> Option<Driver> {
+    pub(super) fn stop(&mut self, handle: &Handle) -> Option<Driver> {
         self.stop.store(true, Ordering::Release);
         handle.inner.driver().unpark();
-        self.thread.join().ok()
+        self.thread.take()?.join().ok()
     }
 }
 

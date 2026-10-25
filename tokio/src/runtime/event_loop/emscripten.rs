@@ -159,11 +159,17 @@ impl Reactor {
         self.hold(handle.inner.num_alive_tasks() > 0);
     }
 
-    pub(super) fn stop(self, handle: &Handle) -> Option<Driver> {
+    pub(super) fn stop(&mut self, handle: &Handle) -> Option<Driver> {
         self.arm(handle, None);
         self.hold(false);
         #[cfg(feature = "net")]
-        let _ = self.listen(false);
+        {
+            let removed = self.listen(false);
+            debug_assert!(
+                removed.is_ok(),
+                "readiness listener not removed: {removed:?}"
+            );
+        }
         None
     }
 

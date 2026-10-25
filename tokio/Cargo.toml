@@ -205,5 +205,10 @@ name = "rt_emscripten_event_loop_main"
 path = "tests/rt_emscripten_event_loop_main.rs"
 harness = false
 
+[[test]]
+name = "rt_emscripten_event_loop_drop"
+path = "tests/rt_emscripten_event_loop_drop.rs"
+harness = false
+
 [lints]
 workspace = true
